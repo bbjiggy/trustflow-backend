@@ -10,6 +10,7 @@ import { RateLimitModule } from './common/rate-limit/rate-limit.module';
 import { UserProfileModule } from './user-profile/user-profile.module';
 import { EventIngestionModule } from './event-ingestion/event-ingestion.module';
 import { DisputeModule } from './dispute/dispute.module';
+import { MigrationModule } from './migration/migration.module';
 
 @Module({
   imports: [
@@ -24,6 +25,7 @@ import { DisputeModule } from './dispute/dispute.module';
     StellarModule,
     EventIngestionModule,
     DisputeModule,
+    MigrationModule,
   ],
 })
 export class AppModule {}
