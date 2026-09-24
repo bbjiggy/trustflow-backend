@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { Logger } from '@nestjs/common';
 import { EscrowService, ESCROW_PERSISTENCE_FALLBACK_METRIC } from './escrow.service';
 import { REDIS_CLIENT } from '../common/redis/redis.module';
 import { MetricsService } from '../monitoring/metrics.service';
@@ -69,6 +70,18 @@ describe('EscrowService', () => {
         const escrow = await service.create(DEPOSITOR, BENEFICIARY, AMOUNT);
         expect(escrow.disputeReason).toBeUndefined();
         expect(escrow.disputedAt).toBeUndefined();
+      });
+
+      it('still stores a self-dealing escrow (depositor === beneficiary) but logs a warning (#437)', async () => {
+        const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+        const escrow = await service.create(DEPOSITOR, DEPOSITOR, AMOUNT);
+
+        expect(escrow.depositor).toBe(DEPOSITOR);
+        expect(escrow.beneficiary).toBe(DEPOSITOR);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('self-dealing'));
+
+        warnSpy.mockRestore();
       });
 
       it('generates unique IDs even when called concurrently in a tight loop', async () => {
@@ -407,6 +420,23 @@ describe('EscrowService', () => {
         expect(created.status).toBe('active');
         expect(await service.findById(created.id)).toEqual(created);
         expect((await service.findByContractEscrowId('contract-xyz'))?.id).toBe(created.id);
+      });
+
+      it('still stores a self-dealing escrow found on-chain but logs a warning (#437)', async () => {
+        const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+        const escrow = await service.createFromChainState({
+          contractEscrowId: 'chain-esc-2',
+          depositor: DEPOSITOR,
+          beneficiary: DEPOSITOR,
+          amountXLM: AMOUNT,
+          status: 'active',
+        });
+
+        expect(escrow.depositor).toBe(escrow.beneficiary);
+        expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('self-dealing'));
+
+        warnSpy.mockRestore();
       });
     });
   });

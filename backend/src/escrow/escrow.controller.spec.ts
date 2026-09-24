@@ -118,6 +118,25 @@ describe('EscrowController', () => {
       expect(mocks.escrowService.create).toHaveBeenCalledWith(DEPOSITOR, BENEFICIARY, AMOUNT);
       expect(result).toEqual(mocks.escrow);
     });
+
+    it('rejects a self-dealing escrow (depositor === beneficiary) with 400', () => {
+      const { BadRequestException } = jest.requireActual('@nestjs/common');
+      const dto = { depositor: DEPOSITOR, beneficiary: DEPOSITOR, amountXLM: AMOUNT };
+
+      expect(() => controller.create(dto)).toThrow(BadRequestException);
+      expect(mocks.escrowService.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects a malformed address with 400 (not 500)', () => {
+      const { BadRequestException } = jest.requireActual('@nestjs/common');
+      const dto = {
+        depositor: 'not-a-stellar-address',
+        beneficiary: BENEFICIARY,
+        amountXLM: AMOUNT,
+      };
+
+      expect(() => controller.create(dto)).toThrow(BadRequestException);
+    });
   });
 
   // ─── GET /escrows/:id (findOne) ───────────────────────────────────────────
@@ -130,12 +149,10 @@ describe('EscrowController', () => {
       expect(result).toEqual(mocks.escrow);
     });
 
-    it('returns undefined for an unknown escrow id (service returns undefined)', async () => {
+    it('throws NotFoundException for an unknown escrow id', async () => {
       mocks.escrowService.findById.mockResolvedValue(undefined);
 
-      const result = await controller.findOne('esc-unknown');
-
-      expect(result).toBeUndefined();
+      await expect(controller.findOne('esc-unknown')).rejects.toThrow(NotFoundException);
     });
   });
 
