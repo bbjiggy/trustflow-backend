@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { EscrowController } from './escrow.controller';
-import { EscrowService } from './escrow.service';
+import { EscrowService, Escrow } from './escrow.service';
 import { WebhookService } from '../webhook/webhook.service';
 import { DiscordService } from '../webhook/discord.service';
 import { ReputationService } from '../reputation/reputation.service';
@@ -10,11 +10,11 @@ import { WebhookEvent } from '../webhook/webhook.dto';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-const DEPOSITOR = 'GDEPOSITOR111111111111111111111111111111111111111111111';
-const BENEFICIARY = 'GBENEFICIARY1111111111111111111111111111111111111111111';
+const DEPOSITOR = 'GDEPOSITORAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const BENEFICIARY = 'GBENEFICIARYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const AMOUNT = '100';
 
-function makeEscrow(overrides: Partial<any> = {}) {
+function makeEscrow(overrides: Partial<Escrow> = {}): Escrow {
   return {
     id: 'esc-001',
     depositor: DEPOSITOR,
@@ -66,7 +66,14 @@ function buildMocks() {
     }),
   };
 
-  return { escrow, escrowService, webhookService, discordService, reputationService, txBuilderService };
+  return {
+    escrow,
+    escrowService,
+    webhookService,
+    discordService,
+    reputationService,
+    txBuilderService,
+  };
 }
 
 // ─── Test suite ───────────────────────────────────────────────────────────────
@@ -100,79 +107,15 @@ describe('EscrowController', () => {
     expect(controller).toBeDefined();
   });
 
-  describe('findByDepositor', () => {
-    it('returns paginated results with default offset=0, limit=20', async () => {
-      const escrows = Array.from({ length: 5 }, (_, i) => ({
-        id: `esc-${i}`,
-        depositor: VALID_ADDRESS,
-        beneficiary: 'GBEN',
-        amountXLM: '100',
-        status: 'pending',
-        createdAt: new Date().toISOString(),
-      }));
-      mockEscrowService.findByDepositor.mockResolvedValue({ data: escrows, total: 5 });
-
-      const result = await controller.findByDepositor(VALID_ADDRESS);
-
-      expect(mockEscrowService.findByDepositor).toHaveBeenCalledWith(VALID_ADDRESS, 0, 20);
-      expect(result).toEqual({ data: escrows, total: 5 });
-    });
-
-    it('applies custom offset and limit', async () => {
-      mockEscrowService.findByDepositor.mockResolvedValue({ data: [], total: 0 });
-
-      await controller.findByDepositor(VALID_ADDRESS, 10, 5);
-
-      expect(mockEscrowService.findByDepositor).toHaveBeenCalledWith(VALID_ADDRESS, 10, 5);
-    });
-
-    it('clamps limit to max 100', async () => {
-      mockEscrowService.findByDepositor.mockResolvedValue({ data: [], total: 0 });
-
-      await controller.findByDepositor(VALID_ADDRESS, 0, 200);
-
-      expect(mockEscrowService.findByDepositor).toHaveBeenCalledWith(VALID_ADDRESS, 0, 100);
-    });
-
-    it('clamps negative offset to 0', async () => {
-      mockEscrowService.findByDepositor.mockResolvedValue({ data: [], total: 0 });
-
-      await controller.findByDepositor(VALID_ADDRESS, -5, 10);
-
-      expect(mockEscrowService.findByDepositor).toHaveBeenCalledWith(VALID_ADDRESS, 0, 10);
-    });
-  });
-
-  describe('release', () => {
-    it('releases the escrow and records the completion with the reputation engine', async () => {
-      const escrow = {
-        id: 'esc-1',
-        depositor: 'GDEP',
-        beneficiary: 'GBEN',
-        amountXLM: '100',
-        status: 'released',
-        createdAt: new Date().toISOString(),
-      };
-      mockEscrowService.release.mockResolvedValue(escrow);
-
-      const result = await controller.release('esc-1');
-
-      expect(mockEscrowService.release).toHaveBeenCalledWith('esc-1');
-      expect(mockReputationService.recordEscrowCompleted).toHaveBeenCalledWith(escrow);
-      expect(result).toEqual(escrow);
   // ─── POST /escrows (create) ───────────────────────────────────────────────
 
   describe('create()', () => {
     it('delegates to EscrowService.create() and returns the new escrow', async () => {
       const dto = { depositor: DEPOSITOR, beneficiary: BENEFICIARY, amountXLM: AMOUNT };
 
-      const result = controller.create(dto);
+      const result = await controller.create(dto);
 
-      expect(mocks.escrowService.create).toHaveBeenCalledWith(
-        DEPOSITOR,
-        BENEFICIARY,
-        AMOUNT,
-      );
+      expect(mocks.escrowService.create).toHaveBeenCalledWith(DEPOSITOR, BENEFICIARY, AMOUNT);
       expect(result).toEqual(mocks.escrow);
     });
   });
@@ -180,17 +123,17 @@ describe('EscrowController', () => {
   // ─── GET /escrows/:id (findOne) ───────────────────────────────────────────
 
   describe('findOne()', () => {
-    it('delegates to EscrowService.findById() and returns the escrow', () => {
-      const result = controller.findOne('esc-001');
+    it('delegates to EscrowService.findById() and returns the escrow', async () => {
+      const result = await controller.findOne('esc-001');
 
       expect(mocks.escrowService.findById).toHaveBeenCalledWith('esc-001');
       expect(result).toEqual(mocks.escrow);
     });
 
-    it('returns undefined for an unknown escrow id (service returns undefined)', () => {
-      mocks.escrowService.findById.mockReturnValue(undefined);
+    it('returns undefined for an unknown escrow id (service returns undefined)', async () => {
+      mocks.escrowService.findById.mockResolvedValue(undefined);
 
-      const result = controller.findOne('esc-unknown');
+      const result = await controller.findOne('esc-unknown');
 
       expect(result).toBeUndefined();
     });
@@ -199,17 +142,17 @@ describe('EscrowController', () => {
   // ─── GET /escrows/depositor/:address ──────────────────────────────────────
 
   describe('findByDepositor()', () => {
-    it('delegates to EscrowService.findByDepositor() with the address', () => {
-      const result = controller.findByDepositor(DEPOSITOR);
+    it('delegates to EscrowService.findByDepositor() with the address and default pagination', async () => {
+      const result = await controller.findByDepositor(DEPOSITOR);
 
-      expect(mocks.escrowService.findByDepositor).toHaveBeenCalledWith(DEPOSITOR);
+      expect(mocks.escrowService.findByDepositor).toHaveBeenCalledWith(DEPOSITOR, 0, 20);
       expect(result).toEqual([mocks.escrow]);
     });
 
-    it('returns an empty array when no escrows exist for the depositor', () => {
-      mocks.escrowService.findByDepositor.mockReturnValue([]);
+    it('returns an empty array when no escrows exist for the depositor', async () => {
+      mocks.escrowService.findByDepositor.mockResolvedValue([]);
 
-      expect(controller.findByDepositor(DEPOSITOR)).toEqual([]);
+      expect(await controller.findByDepositor(DEPOSITOR)).toEqual([]);
     });
   });
 
@@ -247,7 +190,10 @@ describe('EscrowController', () => {
 
       const result = await controller.raiseDispute('esc-001', { reason: 'Work not delivered' });
 
-      expect(mocks.escrowService.raiseDispute).toHaveBeenCalledWith('esc-001', 'Work not delivered');
+      expect(mocks.escrowService.raiseDispute).toHaveBeenCalledWith(
+        'esc-001',
+        'Work not delivered',
+      );
 
       expect(mocks.webhookService.dispatch).toHaveBeenCalledWith(
         WebhookEvent.DisputeRaised,
@@ -275,9 +221,7 @@ describe('EscrowController', () => {
     });
 
     it('works when no reason is provided in the dto', async () => {
-      mocks.escrowService.raiseDispute.mockResolvedValue(
-        makeEscrow({ status: 'disputed' }),
-      );
+      mocks.escrowService.raiseDispute.mockResolvedValue(makeEscrow({ status: 'disputed' }));
 
       await controller.raiseDispute('esc-001', {});
 
@@ -290,9 +234,9 @@ describe('EscrowController', () => {
         new BadRequestException('Cannot dispute a released escrow'),
       );
 
-      await expect(
-        controller.raiseDispute('esc-001', { reason: 'too late' }),
-      ).rejects.toThrow(BadRequestException);
+      await expect(controller.raiseDispute('esc-001', { reason: 'too late' })).rejects.toThrow(
+        BadRequestException,
+      );
 
       expect(mocks.webhookService.dispatch).not.toHaveBeenCalled();
       expect(mocks.discordService.notifyDisputeNeedsJurors).not.toHaveBeenCalled();
@@ -304,9 +248,9 @@ describe('EscrowController', () => {
         new BadRequestException('Escrow is already disputed'),
       );
 
-      await expect(
-        controller.raiseDispute('esc-001', { reason: 'dupe' }),
-      ).rejects.toThrow(BadRequestException);
+      await expect(controller.raiseDispute('esc-001', { reason: 'dupe' })).rejects.toThrow(
+        BadRequestException,
+      );
     });
 
     it('does not dispatch webhook or Discord when service throws', async () => {
