@@ -13,6 +13,7 @@ import { Redis } from 'ioredis';
 import { REDIS_CLIENT } from '../common/redis/redis.module';
 import { CircuitBreakerService } from '../common/circuit-breaker';
 import { MetricsService } from '../monitoring/metrics.service';
+import { ProviderHealthService } from './provider-health.service';
 import { config } from '../config/env.config';
 import { computeCidV1Raw } from './cid.util';
 import { PinContentDto } from './ipfs-pinning.dto';
@@ -41,20 +42,22 @@ export const IPFS_PINNING_PERSISTENCE_FALLBACK_METRIC = 'ipfs_pinning_persistenc
 export const IPFS_UNPIN_FAILURE_METRIC = 'ipfs_unpin_failure_total';
 
 /**
+ * Sequential provider priority order: Pinata → Infura → Web3.Storage.
+ * Order matches PinProviderName enum values: 'pinata', 'infura', 'web3.storage'.
+ * Providers are tried in this exact order until replicationFactor successes are achieved.
+ */
+export const PIN_PROVIDER_PRIORITY = ['pinata', 'infura', 'web3.storage'] as const;
+
+/**
  * Pin registry. Backed by Redis so pin metadata survives restarts and is shared across
  * instances — see PERSISTENT_STORAGE_SPIKE.md and its "Follow-up decisions" addendum (#189).
  *
- * Decision: drop retry-without-refetch entirely. The service no longer retains original bytes
- * for a pinned CID after the initial upload, so a later re-pin can only succeed if the caller
- * provides the content again. This keeps the system operational without introducing object-
- * storage infrastructure or a hidden per-process memory dependency. Reconcile/replicate now fail
- * explicitly when the content is missing instead of silently no-op'ing and leaving the pin
- * degraded indefinitely.
- *
- * Falls back to a process-local Map for pin metadata when Redis is unavailable, logged at
- * `error` level and counted via `IPFS_PINNING_PERSISTENCE_FALLBACK_METRIC`.
+ * Decision: enforce strict sequential failover across providers. After a successful
+ * pin to the first provider, a background job cross-pins to remaining providers
+ * for redundancy. Falls back to a process-local Map for pin metadata when Redis is
+ * unavailable, logged at `error` level and counted via `IPFS_PINNING_PERSISTENCE_FALLBACK_METRIC`.
  */
-@Injectable()
+ @Injectable()
 export class IpfsPinningService implements OnModuleInit {
   private readonly logger = new SanitizedLogger(IpfsPinningService.name);
 
@@ -67,6 +70,7 @@ export class IpfsPinningService implements OnModuleInit {
     private readonly circuitBreakerService: CircuitBreakerService,
     @Optional() @Inject(REDIS_CLIENT) private readonly redis: Redis | null = null,
     @Optional() private readonly metrics?: MetricsService,
+    @Optional() private readonly providerHealth?: ProviderHealthService,
   ) {
     if (this.providers.length === 0) {
       throw new Error('IpfsPinningService requires at least one registered pin provider');
@@ -121,9 +125,12 @@ export class IpfsPinningService implements OnModuleInit {
 
   /**
    * Computes the content hash, verifies it against `expectedCid` (if supplied), then pins
-   * across providers in priority order until `replicationFactor` providers succeed —
-   * automatically failing over to the next provider whenever one throws or fails
-   * post-pin verification.
+   * across providers sequentially in priority order (Pinata → Infura → Web3.Storage) until
+   * `replicationFactor` providers succeed. After a successful pin, dispatches a background
+   * job to cross-pin to remaining providers for redundancy.
+   *
+   * The upload itself blocks until enough providers have confirmed, but the cross-pinning
+   * is fire-and-forge and does not delay the response.
    */
   async pinContent(dto: PinContentDto): Promise<PinRecord> {
     const buffer = Buffer.from(dto.content, 'base64');
@@ -168,7 +175,100 @@ export class IpfsPinningService implements OnModuleInit {
     record.replicationFactor = Math.max(record.replicationFactor, replicationFactor);
     await this.persist(record);
 
-    await this.replicate(record, buffer);
+    // Sequential failover: try providers in priority order until we have enough successes
+    const successfulProviders: PinProviderName[] = [];
+    const failedProviders: { name: PinProviderName; error: string }[] = [];
+
+    // Get the ordered list of provider names from PIN_PROVIDER_PRIORITY
+    const providerNameOrder = PIN_PROVIDER_PRIORITY.filter(name => {
+      return this.providers.some(p => p.name === name);
+    });
+
+    for (const providerName of providerNameOrder as PinProviderName[]) {
+      const provider = this.providers.find(p => p.name === providerName);
+      if (!provider) continue;
+
+      try {
+        // Execute pin with circuit breaker
+        const entry = this.upsertProviderEntry(record, providerName);
+        entry.attempts += 1;
+
+        const pinResult = await this.circuitBreakerService.execute(
+          `ipfs-pin-${providerName}`,
+          async () => provider.pin(record.cid, buffer),
+          {
+            name: `ipfs-pin-${providerName}`,
+            timeout: 60000,
+            errorThresholdPercentage: 50,
+            resetTimeout: 30000,
+          },
+        );
+
+        // Verify the pin was successful
+        const verified = await this.circuitBreakerService.execute(
+          `ipfs-verify-${providerName}`,
+          async () => provider.verify(record.cid),
+          {
+            name: `ipfs-verify-${providerName}`,
+            timeout: 30000,
+            errorThresholdPercentage: 50,
+            resetTimeout: 30000,
+          },
+        );
+
+        if (!verified) throw new Error('Provider did not confirm the pin after upload');
+
+        entry.status = ProviderPinStatus.PINNED;
+        entry.pinnedAt = new Date().toISOString();
+        entry.lastVerifiedAt = entry.pinnedAt;
+        entry.lastError = undefined;
+        successfulProviders.push(providerName);
+
+        // Record health success
+        if (this.providerHealth) {
+          await this.providerHealth.recordPinSuccess(providerName, 5000); // approximate latency
+        }
+
+        // Check if we've reached the replication factor
+        if (successfulProviders.length >= replicationFactor) {
+          break;
+        }
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        failedProviders.push({ name: providerName, error: errMsg });
+
+        // Record health failure
+        if (this.providerHealth) {
+          await this.providerHealth.recordPinFailure(providerName, 5000, error as Error);
+        }
+
+        this.logger.warn(
+          `Provider ${providerName} failed to pin ${record.cid}: ${errMsg} — failing over`,
+        );
+
+        // Continue to next provider in sequence
+        continue;
+      }
+    }
+
+    // Update record with successful providers
+    record.providers = successfulProviders.map(name => {
+      const entry = this.upsertProviderEntry(record, name);
+      // Re-fetch the entry we just created
+      const existingEntry = record.providers.find(e => e.provider === name);
+      return existingEntry ?? { provider: name, status: ProviderPinStatus.PINNED, attempts: 1 };
+    });
+
+    // Finalize status based on how many providers succeeded
+    this.finalizeStatus(record);
+
+    await this.persist(record);
+
+    // Fire-and-forge background cross-pinning to remaining providers
+    // This does not block the response but ensures redundancy
+    if (isNew && successfulProviders.length > 0 && successfulProviders.length < this.providers.length) {
+      void this.crossPinRemainingProviders(record, buffer, successfulProviders);
+    }
 
     if (isNew && this.countHealthy(record) > 0) {
       await this.webhookService.dispatch(IPFS_EVENTS.PIN_CREATED, {
@@ -179,6 +279,46 @@ export class IpfsPinningService implements OnModuleInit {
     }
 
     return record;
+  }
+
+  /**
+   * Fire-and-forge background cross-pinning to providers not yet attempted.
+   * Dispatches a NestJS background pattern via async void to not block the response.
+   */
+  private async crossPinRemainingProviders(
+    record: PinRecord,
+    content: Buffer,
+    alreadySuccessful: PinProviderName[],
+  ): Promise<void> {
+    const candidates = this.providers.filter(p => !alreadySuccessful.includes(p.name));
+
+    if (candidates.length === 0) return;
+
+    this.logger.log(`Starting background cross-pin to ${candidates.length} remaining providers for CID ${record.cid}`);
+
+    for (const provider of candidates) {
+      try {
+        await this.pinWithProvider(record, provider, content);
+        // Record health success for the cross-pin
+        if (this.providerHealth) {
+          await this.providerHealth.recordPinSuccess(provider.name, 5000);
+        }
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Background cross-pin failed for provider ${provider.name}: ${errMsg}`,
+        );
+        // Record health failure for the cross-pin
+        if (this.providerHealth) {
+          await this.providerHealth.recordPinFailure(provider.name, 5000, error as Error);
+        }
+        // Non-fatal — cross-pin best-effort only
+      }
+    }
+
+    // Re-finalize status after cross-pin attempts
+    this.finalizeStatus(record);
+    await this.persist(record);
   }
 
   /**
@@ -210,7 +350,8 @@ export class IpfsPinningService implements OnModuleInit {
     }
 
     // Never top up replication for a pin the caller asked to remove.
-    const buffer = record.status === PinStatus.UNPINNING ? undefined : this.content.get(cid);
+// Content is not retained after initial pin, so replicate will be called with undefined.
+    const buffer = undefined;
     if (this.countHealthy(record) < record.replicationFactor && buffer) {
       await this.replicate(record, buffer).catch(error => {
         this.logger.warn(
@@ -291,7 +432,6 @@ export class IpfsPinningService implements OnModuleInit {
     }
 
     record.status = PinStatus.UNPINNED;
-    this.content.delete(cid);
     await this.persist(record);
 
     await this.webhookService.dispatch(IPFS_EVENTS.PIN_REMOVED, { cid });

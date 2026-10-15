@@ -253,6 +253,11 @@ const EnvSchema = z
     INFURA_IPFS_PROJECT_SECRET: z.string().optional().describe('Infura IPFS project secret'),
     IPFS_REPIN_SWEEP_CONCURRENCY: z.coerce.number().int().positive().default(8),
     IPFS_REPIN_INTERVAL_MS: optionalNonnegativeInt(),
+    IPFS_PROVIDER_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+
+    // Arweave Configuration
+    ARWEAVE_JWT: z.string().optional().describe('Arweave wallet key in JWK format'),
+    ARWEAVE_UPLOAD_URL: z.string().url().optional().describe('Arweave upload endpoint URL'),
 
     // Reputation System Configuration
     REPUTATION_DECAY_HALF_LIFE_MS: z.coerce.number().int().positive().optional(),

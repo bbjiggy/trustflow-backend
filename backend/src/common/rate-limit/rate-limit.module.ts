@@ -3,9 +3,10 @@ import { APP_GUARD } from '@nestjs/core';
 import { RateLimitGuard } from './rate-limit.guard';
 import { RedisModule } from '../redis/redis.module';
 import { MonitoringModule } from '../../monitoring/monitoring.module';
+import { ReputationModule } from '../reputation/reputation.module';
 
 @Module({
-  imports: [RedisModule, MonitoringModule],
+  imports: [RedisModule, MonitoringModule, ReputationModule],
   providers: [
     {
       provide: APP_GUARD,

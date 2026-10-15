@@ -1,4 +1,4 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../auth/auth.guard';
 import { AdminGuard } from './admin.guard';
@@ -8,6 +8,7 @@ import {
   DisputeAnalyticsDto,
   EscrowAnalyticsDto,
   GigAnalyticsDto,
+  PaginatedEscrowAnalyticsDto,
 } from './admin.dto';
 
 @ApiTags('Admin')
@@ -38,8 +39,11 @@ export class AdminController {
   @ApiResponse({ status: 200, type: EscrowAnalyticsDto })
   @ApiResponse({ status: 401, description: 'Missing or invalid JWT' })
   @ApiResponse({ status: 403, description: 'Caller is authenticated but not an admin address' })
-  getEscrowAnalytics() {
-    return this.adminService.getEscrowAnalytics();
+  getEscrowAnalytics(
+    @Query('limit') limit = 50,
+    @Query('cursor') cursor?: string,
+  ) {
+    return this.adminService.getEscrowAnalytics(limit, cursor);
   }
 
   @Get('gigs')

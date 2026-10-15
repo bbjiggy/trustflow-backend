@@ -451,27 +451,30 @@ export class EscrowService implements OnModuleInit {
     return escrow;
   }
 
-  /**
-   * Add a milestone to an escrow
-   */
-  async addMilestone(
-    escrowId: string,
-    title: string,
-    amountXLM: string,
-  ): Promise<Milestone> {
-    const escrow = this.escrows.get(escrowId);
-    if (!escrow) throw new Error('Escrow not found');
-
-    const id = `ms-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-    const milestone: Milestone = {
-      id,
-      escrowId,
-      title,
-      amountXLM,
-      status: 'pending',
-    };
-    this.milestones.set(id, milestone);
-    return milestone;
+  /** Writes an escrow's current field values without touching any index (its id/depositor never change). */
+  private async persist(escrow: Escrow, eventType?: string): Promise<void> {
+    // Auto-increment version for optimistic locking on every write
+    escrow.version = (escrow.version ?? 0) + 1;
+    
+    const event = eventType
+      ? this.outbox?.create(eventType, 'escrow', escrow.id, escrow)
+      : undefined;
+    if (this.redis) {
+      try {
+        const transaction = this.redis
+          .multi()
+          .set(this.escrowKey(escrow.id), JSON.stringify(escrow));
+        if (event) this.outbox!.appendToTransaction(transaction, event);
+        const results = await transaction.exec();
+        assertTransactionApplied(results);
+        return;
+      } catch (err) {
+        this.rethrowIfInconsistent('persist', escrow.id, err);
+        this.logFallback('persist', err);
+      }
+    }
+    this.escrows.set(escrow.id, escrow);
+    if (event) await this.outbox!.append(event);
   }
 
   /**

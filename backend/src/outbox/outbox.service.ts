@@ -123,20 +123,46 @@ export class OutboxService {
     return this.processEvent(id);
   }
 
-  /**
-   * Replay all dead-lettered events
-   */
-  async replayAll(): Promise<BatchApprovalResult> {
-    const deadLetterEvents = this.getDeadLetterEvents();
-    const result: BatchApprovalResult = { succeeded: [], failed: [] };
+  async retry(event: OutboxEvent, error: unknown, isWebhook = false): Promise<void> {
+    const pendingKey = isWebhook ? WEBHOOK_PENDING_KEY : PENDING_KEY;
+    const processingKey = isWebhook ? WEBHOOK_PROCESSING_KEY : PROCESSING_KEY;
+    event.attempts += 1;
+    event.lastError = error instanceof Error ? error.message : String(error);
+    const failed =
+      event.attempts >= config.OUTBOX_MAX_ATTEMPTS;
+    // Use 'retrying' status to distinguish retry attempts from initial pending state
+    event.status = failed ? 'failed' : 'retrying';
+    if (!failed) {
+      // Exponential backoff with cap at 30 seconds
+      event.nextAttemptAt =
+        Date.now() + Math.min(1000 * 2 ** Math.min(event.attempts - 1, 5), 30_000);
+    }
 
-    for (const event of deadLetterEvents) {
-      const replayResult = await this.replayEvent(event.id);
-      if (replayResult.success) {
-        result.succeeded.push(event.id);
-      } else {
-        result.failed.push({ id: event.id, reason: replayResult.error || 'Unknown error' });
-      }
+    if (this.redis) {
+      const transaction = this.redis
+        .multi()
+        .set(this.eventKey(event.id), JSON.stringify(event))
+        .zrem(processingKey, event.id);
+      if (!failed) transaction.zadd(pendingKey, event.nextAttemptAt, event.id);
+      const results = await transaction.exec();
+      this.assertTransactionOk(results);
+      if (failed)
+        this.logger.error(
+          `Outbox event ${event.id} failed after ${event.attempts} attempts: ${event.lastError}`,
+        );
+      return;
+    }
+
+    this.memory.set(event.id, event);
+    const processingMap = isWebhook ? this.webhookProcessing : this.processing;
+    const pendingSet = isWebhook ? this.webhookPending : this.pending;
+    processingMap.delete(event.id);
+    if (failed) {
+      this.logger.error(
+        `Outbox event ${event.id} failed after ${event.attempts} attempts: ${event.lastError}`,
+      );
+    } else {
+      pendingSet.add(event.id);
     }
 
     this.logger.log(

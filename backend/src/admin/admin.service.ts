@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { EscrowAnalyticsService } from './escrow-analytics.service';
 import { EscrowService } from '../escrow/escrow.service';
 import { GigService } from '../gig/gig.service';
 import { DisputeSagaService } from '../dispute/dispute-saga.service';
@@ -32,6 +33,7 @@ export class AdminService {
     private readonly reputationService: ReputationService,
     private readonly migrationRunnerService: MigrationRunnerService,
     private readonly reconciliationService: EscrowReconciliationService,
+    private readonly escrowAnalyticsService: EscrowAnalyticsService,
   ) {}
 
   async getOverview(): Promise<AnalyticsOverview> {
@@ -55,13 +57,19 @@ export class AdminService {
     };
   }
 
-  async getEscrowAnalytics(): Promise<EscrowAnalytics> {
-    const escrows = await this.escrowService.findAll();
-    const totalValueXLM = sumAmounts(escrows.map(escrow => escrow.amountXLM));
+  async getEscrowAnalytics(
+    limit = 50,
+    cursor?: string,
+  ): Promise<EscrowAnalytics> {
+    const analytics = await this.escrowAnalyticsService.getPaginatedEscrowAnalytics(
+      limit,
+      cursor,
+    );
+
     return {
-      total: escrows.length,
-      byStatus: this.tally(escrows.map(escrow => escrow.status)),
-      totalValueXLM,
+      total: analytics.data.total,
+      byStatus: analytics.data.byStatus,
+      totalValueXLM: analytics.data.totalValueXLM,
     };
   }
 

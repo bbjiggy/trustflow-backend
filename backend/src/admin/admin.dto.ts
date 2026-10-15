@@ -16,6 +16,21 @@ const STATUS_COUNT_MAP_SCHEMA = {
   additionalProperties: { type: 'number' as const },
 };
 
+export class PaginatedEscrowAnalyticsDto implements PaginatedEscrowAnalytics {
+  @ApiProperty() total!: number;
+  @ApiProperty({
+    ...STATUS_COUNT_MAP_SCHEMA,
+    example: { pending: 3, active: 12, released: 40, disputed: 2, cancelled: 1 },
+  })
+  byStatus!: Record<string, number>;
+  @ApiProperty({
+    type: 'string',
+    description: 'Sum of amountXLM across every escrow, regardless of status, as a decimal string',
+    example: '1234.5678901',
+  })
+  totalValueXLM!: string;
+}
+
 export class EscrowAnalyticsDto implements EscrowAnalytics {
   @ApiProperty() total!: number;
   @ApiProperty({
@@ -29,6 +44,12 @@ export class EscrowAnalyticsDto implements EscrowAnalytics {
     example: '1234.5678901',
   })
   totalValueXLM!: string;
+}
+
+export interface PaginatedEscrowAnalytics {
+  total: number;
+  byStatus: Record<string, number>;
+  totalValueXLM: string;
 }
 
 export class GigAnalyticsDto implements GigAnalytics {

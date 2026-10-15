@@ -49,6 +49,7 @@ export interface DisputeSaga {
   votes?: JurorVote[];
   verdict?: DisputeVerdict;
   payoutTxHash?: string;
+  arweaveTxId?: string;
   stepHistory: SagaStepRecord[];
   createdAt: string;
   updatedAt: string;

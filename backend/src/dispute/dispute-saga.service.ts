@@ -25,6 +25,7 @@ import { Escrow, EscrowService } from '../escrow/escrow.service';
 import { WebhookService } from '../webhook/webhook.service';
 import { DiscordService } from '../webhook/discord.service';
 import { NotificationService } from '../notification/notification.service';
+import { ArweaveArchiveService } from './arweave-archive.service';
 import { config } from '../config/env.config';
 import { getCurrentUtcDate, toUtcIsoString } from '../common/dates';
 import { EscrowChainStateClient } from '../escrow-reconciliation/escrow-chain-state.client';
@@ -118,6 +119,7 @@ export class DisputeSagaService implements OnModuleInit {
     private readonly escrowService: EscrowService,
     private readonly webhookService: WebhookService,
     private readonly notificationService: NotificationService,
+    private readonly arweaveArchiveService: ArweaveArchiveService,
     @Inject(REDIS_CLIENT) private readonly redis: Redis | null,
     private readonly metrics: MetricsService,
     @Optional() private readonly audit?: AuditService,
@@ -754,6 +756,38 @@ export class DisputeSagaService implements OnModuleInit {
           payoutTxHash: saga.payoutTxHash,
         });
         await this.webhookService.dispatch(SAGA_EVENTS.SAGA_COMPLETED, { sagaId });
+
+        // ─── NEW: Archive dispute evidence to Arweave for permanent auditability ───
+        try {
+          const txId = await this.arweaveArchiveService.archiveDispute(saga);
+          if (txId) {
+            saga.arweaveTxId = txId;
+            // Persist the transaction ID to Redis so it survives restarts
+            if (this.redis) {
+              try {
+                await this.redis.set(
+                  `saga:arweave:${saga.sagaId}`,
+                  txId,
+                );
+              } catch (err) {
+                this.logger.error(
+                  `Failed to persist Arweave txId to Redis for saga ${saga.sagaId}`,
+                  err,
+                );
+              }
+            }
+            this.logger.log(
+              `Arweave txId ${txId} recorded for completed saga ${saga.sagaId}`,
+            );
+          }
+        } catch (err) {
+          // Archive failure must not block dispute resolution
+          this.logger.error(
+            `Arweave archive failed for completed saga ${saga.sagaId} — continuing without archival`,
+            err,
+          );
+        }
+        // ──────────────────────────────────────────────────────────────
 
         const payoutEscrow = await this.escrowService.findById(saga.escrowId);
         if (payoutEscrow) {
